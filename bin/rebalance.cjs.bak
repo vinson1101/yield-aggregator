@@ -163,10 +163,7 @@ console.log('=== Yield Aggregator (EOA) ===\n');
   console.log('📊 当前状态:');
   console.log(`  Wallet USDC: ${Number(usdcBalance) / 1e6}`);
   console.log(`  Aave aUSDC:  ${Number(aaveBalance) / 1e6} (APY: ${aaveApy * 100}%)`);
-  const morphoSharesNum = Number(morphoShares) / 1e18;
-  const state = loadState();
-  const morphoValue = state.shares?.Morpho?.value || morphoSharesNum * 1.0041;
-  console.log(`  Morpho:     ${morphoSharesNum} shares = ~$${morphoValue.toFixed(2)} (APY: ${morphoApy * 100}%)`);
+  console.log(`  Morpho:     ${Number(morphoShares) / 1e18} shares (APY: ${morphoApy * 100}%)`);
   if (moonwellApy > 0) {
     console.log(`  Moonwell:    ${Number(moonwellShares) / 1e18} shares (APY: ${moonwellApy * 100}%)`);
   }
@@ -190,10 +187,8 @@ console.log('=== Yield Aggregator (EOA) ===\n');
       
       if (!state.shares) state.shares = {};
       if (!state.shares[currentProtocol]) {
-        // 首次存入，使用当前份额作为本金估值
-        const initialValue = currentProtocol === 'Morpho' ? currentShares * 1.0041 : currentShares;  // Morpho 初始 share price ≈ 1.0041
-        state.shares[currentProtocol] = { shares: currentShares, value: initialValue, time: now };
-        console.log('📝 首次记录收益基准: $' + initialValue.toFixed(2));
+        state.shares[currentProtocol] = { shares: currentShares, value: 5, time: now };
+        console.log('📝 首次记录收益基准');
       } else {
         const last = state.shares[currentProtocol];
         const days = (now - last.time) / (1000*60*60*24);
@@ -208,41 +203,23 @@ console.log('=== Yield Aggregator (EOA) ===\n');
           }
         }
         
-        // 计算实时价值：基于初始本金 + APY 复利累积
-        const principal = last.value || 5;  // 使用存储的本金
-        const apy = currentProtocol === 'Morpho' ? morphoApy : (currentProtocol === 'Aave' ? aaveApy : moonwellApy);
-        const estimatedValue = principal * (1 + apy * days / 365);  // 复利计算
-        
-        state.shares[currentProtocol] = { 
-          shares: currentShares, 
-          value: estimatedValue, 
-          time: now 
-        };
+        state.shares[currentProtocol] = { shares: currentShares, value: 5, time: now };
       }
       state.lastCheck = now;
       saveState(state);
       
-      // 保存历史（包含实时价值）
-      const currentApy = currentProtocol === 'Morpho' ? morphoApy : (currentProtocol === 'Aave' ? aaveApy : moonwellApy);
+      // 保存历史
       history.push({
         time: new Date().toISOString(),
         protocol: currentProtocol,
         shares: currentShares,
-        value: state.shares[currentProtocol].value,
-        apy: currentApy
+        apy: currentProtocol === 'Morpho' ? morphoApy : (currentProtocol === 'Aave' ? aaveApy : moonwellApy)
       });
       if (history.length > 30) history.shift();
       saveHistory(history);
     }
     console.log(`  Aave:   ${aaveApy * 100}% → 年收益: $${(totalAave * aaveApy).toFixed(4)}`);
     console.log(`  Morpho: ${morphoApy * 100}% → 年收益: $${(totalMorpho * morphoApy).toFixed(4)}\n`);
-
-  console.log("\n🌞 Solana Yield (参考):");
-  console.log("  LULO: 10.0% (最高)");
-  console.log("  KAMINO: 8.0%");
-  console.log("  MARGINFI: 7.0%");
-  console.log("  SOLEND: 6.0%");
-  console.log("  (需配置 SOLANA_WALLET 才能使用)")
     
     if (totalMorpho > 0 && totalAave > 0) {
       if (morphoApy > aaveApy) {
@@ -252,15 +229,6 @@ console.log('=== Yield Aggregator (EOA) ===\n');
       console.log(`🎯 建议: 切换到 Morpho`);
     } else if (totalMorpho > 0) {
       console.log('💤 当前已是最高收益 (Morpho)');
-
-  // Solana 收益对比提醒
-  const solanaBest = 0.10; // LULO 10%
-  const baseBest = morphoApy;
-  const diff = solanaBest - baseBest;
-  if (diff > 0.03) {
-    console.log("\n⚠️ 提醒: Solana 收益高出 " + (diff*100).toFixed(0) + "%!");
-    console.log("   考虑跨链桥入 Solana");
-  }
     }
     return;
   }
@@ -306,15 +274,6 @@ console.log('=== Yield Aggregator (EOA) ===\n');
     
     if (current.name === best.name) {
       console.log('💤 当前已是最高收益');
-
-  // Solana 收益对比提醒
-  const solanaBest = 0.10; // LULO 10%
-  const baseBest = morphoApy;
-  const diff = solanaBest - baseBest;
-  if (diff > 0.03) {
-    console.log("\n⚠️ 提醒: Solana 收益高出 " + (diff*100).toFixed(0) + "%!");
-    console.log("   考虑跨链桥入 Solana");
-  }
       return;
     }
     
