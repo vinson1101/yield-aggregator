@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Yield Aggregator - 自动切换 + 实时 APY
+ * Yield Aggregator - 自动切换 + 实时 APY + CDP Smart Account
  */
 
-const { createWalletClient, http, encodeFunctionData } = require('viem');
-const { privateKeyToAccount } = require('viem/accounts');
+const { createPublicClient, http, encodeFunctionData } = require('viem');
 const { base } = require('viem/chains');
+const { CdpClient } = require('@coinbase/cdp-sdk');
 
-const PRIVATE_KEY = process.env.EVM_PRIVATE_KEY || '0x29b5a88baa09054abdbf18bfc6deaebe9acafd43a2730e5d42dae29f51e36675';
-const WALLET = '0x1758DE3E2cf746F4eEb7143c3935fCa1B30060ce';
+const CDP_OWNER = process.env.CDP_OWNER_ADDRESS || '';
+const CDP_SMART_ACCOUNT = process.env.CDP_SMART_ACCOUNT_ADDRESS || '';
 
 const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 const AAVE_POOL = '0xa238dd80c259a72e81d7e4664a9801593f98d1c5';
@@ -16,12 +16,10 @@ const AAVE_ATOKEN = '0x4e65fe4dba92790696d040ac24aa414708f5c0ab';
 const MORPHO = '0x8A034f069D59d62a4643ad42E49b846d036468D7';
 const MOONWELL = '0xedc817a28e8b93b03976fbd4a3ddbc9f7d176c22';
 
-
-
-
 const ERC20 = [
   { name: 'approve', type: 'function', inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
   { name: 'balanceOf', type: 'function', inputs: [{ name: 'owner', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { name: 'allowance', type: 'function', inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { name: 'transfer', type: 'function', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' }
 ];
 
@@ -72,37 +70,38 @@ function saveHistory(history) {
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
 }
 
-// 带重试的交易函数
-async function sendTx(wallet, config) {
-  const { abi, address, functionName, args, retries = 3 } = config;
-  
-  for (let i = 0; i < retries; i++) {
-    try {
-      // 估算 Gas
-      try {
-        const gas = await wallet.estimateGas({
-          account: wallet.account,
-          to: address,
-          data: encodeFunctionData({ abi, functionName, args })
-        });
-        config.gas = BigInt(Math.floor(Number(gas) * 1.2)); // +20% buffer
-        console.log(`   ⛽ 预估 Gas: ${config.gas}`);
-      } catch (e) {
-        console.log(`   ⚠️ Gas 估算失败，使用默认值`);
-      }
-      
-      const tx = await wallet.writeContract(config);
-      return tx;
-    } catch (e) {
-      if (i < retries - 1 && e.message?.includes('insufficient')) {
-        console.log(`   ⚠️ 交易失败，重试 ${i+1}/${retries}...`);
-        await new Promise(r => setTimeout(r, 3000));
-        continue;
-      }
-      throw e;
-    }
+// 安全检查：验证 Owner 是普通 EOA（没有被 EIP-7702 攻击）
+// 注意：检查 Owner 地址，不是 Smart Account（Smart Account 是合约，有代码是正常的）
+async function checkWalletSafety(publicClient) {
+  // 检查 Owner EOA 是否被攻击
+  const ownerCode = await publicClient.getCode({ address: CDP_OWNER });
+  if (ownerCode && ownerCode !== '0x') {
+    throw new Error(`⚠️ 安全警告: Owner 钱包 ${CDP_OWNER} 已被攻击！检测到非零代码，可能是 EIP-7702 delegation 攻击。拒绝执行交易！`);
   }
-  throw new Error('重试次数过多');
+  console.log(`✅ 安全检查通过: Owner 是普通 EOA`);
+}
+
+// CDP 交易函数
+async function sendCdpTx(cdpAccount, config) {
+  const { abi, address, functionName, args } = config;
+  
+  try {
+    const calldata = encodeFunctionData({ abi, functionName, args });
+    
+    const result = await cdpAccount.sendUserOperation({
+      calls: [{
+        to: address,
+        data: calldata,
+        value: 0n
+      }]
+    });
+    
+    console.log(`   📤 UserOp: ${result.userOpHash}`);
+    return result.userOpHash;
+  } catch (e) {
+    console.log(`   ❌ 交易失败: ${e.message}`);
+    throw e;
+  }
 }
 
 async function getAPY() {
@@ -145,15 +144,54 @@ try {
 
 async function main() {
   const action = process.argv[2] || 'check';
+  const useCDP = process.argv.includes('--cdp');
   
-  const account = privateKeyToAccount(PRIVATE_KEY);
-  const wallet = createWalletClient({ chain: base, transport: http(), account });
-  const { createPublicClient } = require('viem');
+  // 初始化 CDP
+  const dotenv = require('dotenv');
+  dotenv.config({ path: '/root/.openclaw/workspace/.env.cdp' });
+  
+  const cdp = new CdpClient({
+    apiKeyId: process.env.CDP_API_KEY_ID,
+    apiKeySecret: process.env.CDP_API_KEY_SECRET,
+  });
+
+  // 获取 Smart Account
+  const SMART_ACCOUNT = CDP_SMART_ACCOUNT;
+  const WALLET = CDP_SMART_ACCOUNT;
+  
+  const accountInfo = await cdp.evm.listSmartAccounts();
+  const smartAcc = accountInfo.accounts.find(a => 
+    a.address.toLowerCase() === SMART_ACCOUNT.toLowerCase()
+  );
+  
+  if (!smartAcc) {
+    console.log('❌ 未找到 Smart Account:', SMART_ACCOUNT);
+    return;
+  }
+  
+  const owner = smartAcc.owners?.[0];
+  if (!owner) {
+    console.log('❌ 未找到 Owner');
+    return;
+  }
+  
+  const ownerAccount = await cdp.evm.getAccount({ address: owner });
+  const smartAccount = await cdp.evm.getSmartAccount({
+    address: SMART_ACCOUNT,
+    owner: ownerAccount,
+  });
+  
+  const cdpAccount = await smartAccount.useNetwork('base');
+  
+  console.log('=== Yield Aggregator (CDP Smart Account) ===');
+  console.log(`Smart Account: ${cdpAccount.address}`);
+  console.log(`Owner (CDP Wallet): ${CDP_OWNER}\n`);
+
   const publicClient = createPublicClient({ chain: base, transport: http() });
 
   const { aaveApy, morphoApy, moonwellApy } = await getAPY();
 
-console.log('=== Yield Aggregator (EOA) ===\n');
+console.log('');
 
   const usdcBalance = await publicClient.readContract({ address: USDC, abi: ERC20, functionName: 'balanceOf', args: [WALLET] });
   const aaveBalance = await publicClient.readContract({ address: AAVE_ATOKEN, abi: ERC20, functionName: 'balanceOf', args: [WALLET] });
@@ -175,6 +213,7 @@ console.log('=== Yield Aggregator (EOA) ===\n');
   if (action === 'check') {
     const totalAave = Number(aaveBalance) / 1e6;
     const totalMorpho = Number(morphoShares) / 1e18;
+    const totalMoonwell = Number(moonwellShares) / 1e18;
     
     console.log('📈 收益比较:');
     
@@ -289,7 +328,51 @@ console.log('=== Yield Aggregator (EOA) ===\n');
       { name: 'Moonwell', apy: moonwellApy }
     ].sort((a, b) => b.apy - a.apy)[0];
     
-    if (!current) {
+    // 如果没有存款但钱包有 USDC，直接存入最高收益协议
+    if (!current && usdcBalance > 1000000) {  // > 1 USDC
+      console.log(`💰 钱包有 USDC，自动存入 ${best.name} (APY: ${(best.apy*100).toFixed(1)}%)\n`);
+      
+      // 安全检查 + 授权
+      await checkWalletSafety(publicClient);
+      
+      const usdcBal = usdcBalance.toString();
+      
+      // 检查并 approve
+      const targetContract = best.name === 'Morpho' ? MORPHO : best.name === 'Aave' ? AAVE_POOL : MOONWELL;
+      const allowance = await publicClient.readContract({ address: USDC, abi: ERC20, functionName: 'allowance', args: [WALLET, targetContract] });
+      if (allowance < usdcBalance) {
+        console.log(`🔐 授权 USDC 给 ${best.name}...`);
+        await sendCdpTx(cdpAccount, {
+          address: USDC, abi: ERC20, functionName: 'approve',
+          args: [targetContract, usdcBal]
+        });
+        console.log(`✅ 授权成功，等待确认...`);
+        await new Promise(r => setTimeout(r, 10000)); // 等待 10 秒
+      }
+      
+      // 直接存入最高收益协议
+      console.log(`1️⃣ 存入 ${best.name}...`);
+      
+      if (best.name === 'Morpho') {
+        await sendCdpTx(cdpAccount, {
+          address: MORPHO, abi: MORPHO_ABI, functionName: 'deposit',
+          args: [usdcBal, WALLET]
+        });
+      } else if (best.name === 'Aave') {
+        await sendCdpTx(cdpAccount, {
+          address: AAVE_POOL, abi: AAVE_ABI, functionName: 'supply',
+          args: [USDC, usdcBal, WALLET, 0]
+        });
+      } else if (best.name === 'Moonwell') {
+        await sendCdpTx(cdpAccount, {
+          address: MOONWELL, abi: MOONWELL_ABI, functionName: 'deposit',
+          args: [usdcBal, WALLET]
+        });
+      }
+      
+      console.log(`✅ 成功存入 ${best.name}!`);
+      return;
+    } else if (!current) {
       console.log('💤 无存款，请先存入');
       return;
     }
@@ -326,57 +409,61 @@ console.log('=== Yield Aggregator (EOA) ===\n');
     if (current.name === 'Aave') {
       sourceToken = aaveBalance;
       console.log(`1️⃣ 从 Aave 取款...`);
-      const tx1 = await sendTx(wallet, {
+      await sendCdpTx(cdpAccount, {
         address: AAVE_POOL, abi: AAVE_ABI, functionName: 'withdraw',
         args: [USDC, aaveBalance, WALLET]
       });
-      console.log(`   TX: https://basescan.org/tx/${tx1}`);
     } else if (current.name === 'Morpho') {
       sourceToken = morphoShares;
       console.log(`1️⃣ 从 Morpho 取款...`);
-      const tx1 = await sendTx(wallet, {
+      await sendCdpTx(cdpAccount, {
         address: MORPHO, abi: MORPHO_ABI, functionName: 'withdraw',
-        args: [morphoShares, WALLET, WALLET],
-        abi: MORPHO_ABI, functionName: 'withdraw', address: MORPHO
+        args: [morphoShares, WALLET, WALLET]
       });
-      console.log(`   TX: https://basescan.org/tx/${tx1}`);
     } else if (current.name === 'Moonwell') {
       sourceToken = moonwellShares;
       console.log(`1️⃣ 从 Moonwell 取款...`);
-      const tx1 = await sendTx(wallet, {
+      await sendCdpTx(cdpAccount, {
         address: MOONWELL, abi: MOONWELL_ABI, functionName: 'redeem',
         args: [moonwellShares, WALLET, WALLET]
       });
-      console.log(`   TX: https://basescan.org/tx/${tx1}`);
     }
     
     await new Promise(r => setTimeout(r, 5000));
     
-    // 2. 获取 USDC 余额并 approve
+    // 2. 安全检查 + 获取 USDC 余额并 approve
+    await checkWalletSafety(publicClient);
+    
     const usdcBal = await publicClient.readContract({ address: USDC, abi: ERC20, functionName: 'balanceOf', args: [WALLET] });
+    
+    // 检查是否需要 approve
+    const allowance = await publicClient.readContract({ address: USDC, abi: ERC20, functionName: 'allowance', args: [WALLET, best.name === 'Morpho' ? MORPHO : best.name === 'Aave' ? AAVE_POOL : MOONWELL] });
+    if (allowance < usdcBal) {
+      console.log(`🔐 授权 USDC 给 ${best.name}...`);
+      await sendCdpTx(cdpAccount, {
+        address: USDC, abi: ERC20, functionName: 'approve',
+        args: [best.name === 'Morpho' ? MORPHO : best.name === 'Aave' ? AAVE_POOL : MOONWELL, usdcBal]
+      });
+      console.log(`✅ 授权成功`);
+    }
+    
     console.log(`2️⃣ 存入 ${best.name}...`);
     
     if (best.name === 'Morpho') {
-      await sendTx(wallet, { address: USDC, abi: ERC20, functionName: 'approve', args: [MORPHO, usdcBal] });
-      const tx2 = await sendTx(wallet, {
+      await sendCdpTx(cdpAccount, {
         address: MORPHO, abi: MORPHO_ABI, functionName: 'deposit',
         args: [usdcBal, WALLET]
       });
-      console.log(`   TX: https://basescan.org/tx/${tx2}`);
     } else if (best.name === 'Aave') {
-      await sendTx(wallet, { address: USDC, abi: ERC20, functionName: 'approve', args: [AAVE_POOL, usdcBal] });
-      const tx2 = await sendTx(wallet, {
+      await sendCdpTx(cdpAccount, {
         address: AAVE_POOL, abi: AAVE_ABI, functionName: 'supply',
         args: [USDC, usdcBal, WALLET, 0]
       });
-      console.log(`   TX: https://basescan.org/tx/${tx2}`);
     } else if (best.name === 'Moonwell') {
-      await sendTx(wallet, { address: USDC, abi: ERC20, functionName: 'approve', args: [MOONWELL, usdcBal] });
-      const tx2 = await sendTx(wallet, {
+      await sendCdpTx(cdpAccount, {
         address: MOONWELL, abi: MOONWELL_ABI, functionName: 'deposit',
         args: [usdcBal, WALLET]
       });
-      console.log(`   TX: https://basescan.org/tx/${tx2}`);
     }
     
     console.log('\n✅ 切换完成!');
@@ -384,7 +471,7 @@ console.log('=== Yield Aggregator (EOA) ===\n');
     // 发送 Telegram 通知
     try {
       const { execSync } = require('child_process');
-      const msg = `🔄 Yield 自动切换完成\n从: ${current.name} (${(current.apy*100).toFixed(1)}%)\n到: ${best.name} (${(best.apy*100).toFixed(1)}%)\n收益差: +${(diff*100).toFixed(1)}%`;
+      const msg = `🔄 Yield 自动切换完成 (CDP)\n从: ${current.name} (${(current.apy*100).toFixed(1)}%)\n到: ${best.name} (${(best.apy*100).toFixed(1)}%)\n收益差: +${(diff*100).toFixed(1)}%`;
       execSync(`openclaw message send --target 8270921141 --message "${msg}" 2>/dev/null`, { encoding: 'utf8' });
     } catch (e) {
       console.log('⚠️ 通知发送失败');
