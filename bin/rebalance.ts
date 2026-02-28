@@ -10,7 +10,7 @@ import dotenv from 'dotenv';
 
 dotenv.config({ path: '/root/.openclaw/workspace/base-trading-framework/.env.cdp' });
 
-const SMART_ACCOUNT = '0x125379C903a4E90529A6DCDe40554418fA200399';
+const SMART_ACCOUNT = '0x5Bae0994344d22E0a3377e81204CC7c030c65e96';
 const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 const AAVE_POOL = '0xa238dd80c259a72e81d7e4664a9801593f98d1c5';
 const AAVE_ATOKEN = '0x4e65fe4dba92790696d040ac24aa414708f5c0ab';

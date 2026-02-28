@@ -9,7 +9,7 @@ const cdp = new CdpClient({
 
 async function main() {
   const account = await cdp.evm.getAccount({
-    address: '0x125379C903a4E90529A6DCDe40554418fA200399'
+    address: '0x5Bae0994344d22E0a3377e81204CC7c030c65e96'
   });
   
   console.log('Account:', account.address);

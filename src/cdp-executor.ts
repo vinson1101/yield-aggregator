@@ -27,7 +27,7 @@ async function main() {
     });
 
     // 使用 F0x Smart Account
-    const SMART_ACCOUNT = '0x125379c903a4e90529a6dcde40554418fa200399';
+    const SMART_ACCOUNT = '0x5Bae0994344d22E0a3377e81204CC7c030c65e96';
     
     // 获取 Smart Account
     const accountInfo = await cdp.evm.listSmartAccounts();
